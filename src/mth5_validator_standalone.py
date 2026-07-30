@@ -53,11 +53,40 @@ METADATA_REQUIRED_KEYS = {
     "summary_dataset": set(),
 }
 
+METADATA_REQUIRED_KEYS_BY_VERSION = {
+    "0.1.0": {
+        "root_survey": set(),
+        "stations_container": set(),
+        "reports_group": set(),
+        "filters_group": set(),
+        "standards_group": set(),
+        "transfer_functions_group": set(),
+    },
+    "0.2.0": {
+        "root_experiment": set(),
+        "surveys_container": set(),
+        "stations_container": set(),
+        "reports_group": set(),
+        "filters_group": set(),
+        "standards_group": set(),
+        "transfer_functions_group": set(),
+    },
+}
+
 METADATA_FULL_REQUIRED_KEYS = {
     "survey": {"mth5_type"},
     "station": {"mth5_type"},
     "run": {"mth5_type"},
     "channel": {"mth5_type"},
+}
+
+METADATA_FULL_REQUIRED_KEYS_BY_VERSION = {
+    "0.1.0": {
+        "root_survey": {"mth5_type"},
+    },
+    "0.2.0": {
+        "root_experiment": {"mth5_type"},
+    },
 }
 
 METADATA_TYPE_CHECKS = {
@@ -87,6 +116,8 @@ METADATA_RANGE_CHECKS = {
 }
 
 EXPECTED_MTH5_TYPE_BY_KIND = {
+    "root_survey": "survey",
+    "root_experiment": "experiment",
     "survey": "survey",
     "station": "station",
     "run": "run",
@@ -235,6 +266,29 @@ class ValidationResults:
         """Convert results to JSON string."""
         return json.dumps(self.to_dict(), indent=2, **kwargs)
 
+    def write_jsonl(self, file_path: str | Path, include_info: bool = True) -> int:
+        """Write validation messages to JSONL for batch processing."""
+        output_path = Path(file_path)
+        count = 0
+
+        with output_path.open("w", encoding="utf-8") as fid:
+            for msg in self.messages:
+                if msg.level == ValidationLevel.INFO and not include_info:
+                    continue
+
+                record = {
+                    "file_path": str(self.file_path),
+                    "level": msg.level.value,
+                    "category": msg.category,
+                    "message": msg.message,
+                    "path": msg.path,
+                    "details": msg.details,
+                }
+                fid.write(json.dumps(record) + "\n")
+                count += 1
+
+        return count
+
 
 class MTH5Validator:
     """
@@ -251,6 +305,7 @@ class MTH5Validator:
         check_data: bool = False,
         check_metadata: bool = True,
         metadata_level: str = "quick",
+        strict_metadata: bool = False,
         max_errors: int = 500,
     ):
         self.file_path = Path(file_path)
@@ -260,9 +315,12 @@ class MTH5Validator:
         self.metadata_level = metadata_level.lower()
         if self.metadata_level not in {"quick", "full"}:
             raise ValueError("metadata_level must be 'quick' or 'full'")
+        self.strict_metadata = strict_metadata
         self.max_errors = max_errors
         self.results = ValidationResults(file_path=self.file_path)
         self.h5_file = None
+        self._strict_classes: dict[str, Any] | None = None
+        self._strict_unavailable_reason: str | None = None
 
     def validate(self) -> ValidationResults:
         """Run full validation suite."""
@@ -455,12 +513,31 @@ class MTH5Validator:
 
     def _classify_node_kind(self, path: str, obj: Any, file_version: str) -> str | None:
         """Classify HDF5 node into a metadata schema kind."""
-        if path in {"/Survey", "/Experiment"} and isinstance(obj, h5py.Group):
-            return "survey"
+        if path == "/Survey" and isinstance(obj, h5py.Group):
+            return "root_survey"
+
+        if path == "/Experiment" and isinstance(obj, h5py.Group):
+            return "root_experiment"
+
+        if path.endswith("/Reports") and isinstance(obj, h5py.Group):
+            return "reports_group"
+
+        if path.endswith("/Filters") and isinstance(obj, h5py.Group):
+            return "filters_group"
+
+        if path.endswith("/Standards") and isinstance(obj, h5py.Group):
+            return "standards_group"
+
+        if path.endswith("/Transfer_Functions") and isinstance(obj, h5py.Group):
+            return "transfer_functions_group"
 
         if path.endswith("/channel_summary") or path.endswith("/tf_summary"):
             if isinstance(obj, h5py.Dataset):
                 return "summary_dataset"
+
+        if file_version == "0.1.0" and path == "/Survey/Stations":
+            if isinstance(obj, h5py.Group):
+                return "stations_container"
 
         if file_version == "0.1.0" and path.startswith("/Survey/Stations/"):
             parts = path.split("/")
@@ -471,10 +548,20 @@ class MTH5Validator:
             if isinstance(obj, h5py.Dataset) and len(parts) == 6:
                 return "channel"
 
+        if file_version == "0.2.0" and path == "/Experiment/Surveys":
+            if isinstance(obj, h5py.Group):
+                return "surveys_container"
+
         if file_version == "0.2.0" and path.startswith("/Experiment/Surveys/"):
             parts = path.split("/")
             if isinstance(obj, h5py.Group) and len(parts) == 4:
                 return "survey"
+            if (
+                isinstance(obj, h5py.Group)
+                and len(parts) == 5
+                and parts[4] == "Stations"
+            ):
+                return "stations_container"
             if (
                 isinstance(obj, h5py.Group)
                 and len(parts) == 6
@@ -496,19 +583,128 @@ class MTH5Validator:
 
         return None
 
+    def _get_required_keys(self, kind: str, file_version: str) -> set[str]:
+        """Get required keys for a metadata kind and version."""
+        required = set(METADATA_REQUIRED_KEYS.get(kind, set()))
+        required.update(
+            METADATA_REQUIRED_KEYS_BY_VERSION.get(file_version, {}).get(kind, set())
+        )
+        return required
+
+    def _get_full_required_keys(self, kind: str, file_version: str) -> set[str]:
+        """Get full-mode required keys for a metadata kind and version."""
+        required = set(METADATA_FULL_REQUIRED_KEYS.get(kind, set()))
+        required.update(
+            METADATA_FULL_REQUIRED_KEYS_BY_VERSION.get(file_version, {}).get(
+                kind, set()
+            )
+        )
+        return required
+
+    def _load_strict_metadata_classes(self) -> None:
+        """Lazily load mt_metadata classes for strict validation mode."""
+        if (
+            self._strict_classes is not None
+            or self._strict_unavailable_reason is not None
+        ):
+            return
+
+        try:
+            from mt_metadata.timeseries import (
+                Auxiliary,
+                Electric,
+                Experiment,
+                Magnetic,
+                Run,
+                Station,
+                Survey,
+            )
+        except Exception as exc:
+            self._strict_unavailable_reason = str(exc)
+            return
+
+        self._strict_classes = {
+            "root_experiment": Experiment,
+            "root_survey": Survey,
+            "survey": Survey,
+            "station": Station,
+            "run": Run,
+            "channel_electric": Electric,
+            "channel_magnetic": Magnetic,
+            "channel_auxiliary": Auxiliary,
+        }
+
+    def _get_strict_class_for_node(
+        self,
+        kind: str,
+        path: str,
+        attr_map: dict[str, Any],
+    ) -> Any | None:
+        """Pick strict mt_metadata class for a node kind."""
+        if self._strict_classes is None:
+            return None
+
+        if kind != "channel":
+            return self._strict_classes.get(kind)
+
+        component = str(attr_map.get("component", "")).lower().strip()
+        if not component:
+            component = path.split("/")[-1].lower()
+
+        if component.startswith("e"):
+            return self._strict_classes.get("channel_electric")
+        if component.startswith("h"):
+            return self._strict_classes.get("channel_magnetic")
+        return self._strict_classes.get("channel_auxiliary")
+
+    def _validate_node_metadata_strict(
+        self,
+        path: str,
+        kind: str,
+        attr_map: dict[str, Any],
+    ) -> None:
+        """Validate metadata with mt_metadata schema models when available."""
+        if not self.strict_metadata:
+            return
+
+        self._load_strict_metadata_classes()
+        if self._strict_classes is None:
+            return
+
+        strict_class = self._get_strict_class_for_node(kind, path, attr_map)
+        if strict_class is None:
+            return
+
+        try:
+            strict_obj = strict_class()
+            strict_obj.from_dict(attr_map)
+        except Exception as exc:
+            self._add_metadata_issue(
+                ValidationLevel.ERROR,
+                "META_STRICT_VALIDATION_ERROR",
+                f"Strict metadata validation failed: {exc}",
+                path=path,
+                object_kind=kind,
+                strict_class=strict_class.__name__,
+                exception_type=type(exc).__name__,
+            )
+            if self._max_errors_reached:
+                raise _StopValidation()
+
     def _validate_node_metadata(
         self,
         path: str,
         kind: str,
+        file_version: str,
         attr_map: dict[str, Any],
     ) -> None:
         """Validate one node's metadata attributes against lightweight rules."""
         if self._max_errors_reached:
             raise _StopValidation()
 
-        required_keys = set(METADATA_REQUIRED_KEYS.get(kind, set()))
+        required_keys = self._get_required_keys(kind, file_version)
         if self.metadata_level == "full":
-            required_keys.update(METADATA_FULL_REQUIRED_KEYS.get(kind, set()))
+            required_keys.update(self._get_full_required_keys(kind, file_version))
 
         present_keys = set(attr_map.keys())
         missing_required = sorted(required_keys - present_keys)
@@ -546,6 +742,7 @@ class MTH5Validator:
                     raise _StopValidation()
 
         if self.metadata_level == "quick":
+            self._validate_node_metadata_strict(path, kind, attr_map)
             return
 
         # Full mode enum checks.
@@ -641,14 +838,31 @@ class MTH5Validator:
                     object_kind=kind,
                 )
 
+        self._validate_node_metadata_strict(path, kind, attr_map)
+
     def _validate_metadata(self, file_version: str) -> None:
         """Scan and validate metadata attributes on groups and datasets."""
         scanned_nodes = 0
         validated_nodes = 0
 
+        if self.strict_metadata:
+            self.results.checked_items["strict_metadata_attempted"] = True
+            self._load_strict_metadata_classes()
+            if self._strict_classes is None:
+                self.results.add_warning(
+                    "Metadata",
+                    "Strict metadata validation requested, but mt_metadata is unavailable",
+                    code="META_STRICT_UNAVAILABLE",
+                    reason=self._strict_unavailable_reason,
+                )
+            else:
+                self.results.checked_items["strict_metadata_enabled"] = True
+
         try:
             root_attrs = self._collect_attrs(self.h5_file.attrs)
-            self._validate_node_metadata(path="/", kind="root", attr_map=root_attrs)
+            self._validate_node_metadata(
+                path="/", kind="root", file_version=file_version, attr_map=root_attrs
+            )
             scanned_nodes += 1
             validated_nodes += 1
 
@@ -667,7 +881,10 @@ class MTH5Validator:
                 try:
                     attr_map = self._collect_attrs(obj.attrs)
                     self._validate_node_metadata(
-                        path=path, kind=kind, attr_map=attr_map
+                        path=path,
+                        kind=kind,
+                        file_version=file_version,
+                        attr_map=attr_map,
                     )
                     validated_nodes += 1
                 except _StopValidation:
@@ -939,10 +1156,21 @@ Examples:
         help="Metadata validation strictness (default: quick)",
     )
     validate_parser.add_argument(
+        "--strict-metadata",
+        action="store_true",
+        help="Enable strict metadata validation using mt_metadata schemas when available",
+    )
+    validate_parser.add_argument(
         "--max-errors",
         type=int,
         default=500,
         help="Maximum number of errors before stopping validation (default: 500)",
+    )
+    validate_parser.add_argument(
+        "--jsonl",
+        type=str,
+        default=None,
+        help="Write validation messages to JSONL at the given path",
     )
     validate_parser.add_argument(
         "--json", action="store_true", help="Output results as JSON"
@@ -961,9 +1189,15 @@ Examples:
             check_data=args.check_data,
             check_metadata=not args.no_check_metadata,
             metadata_level=args.metadata_level,
+            strict_metadata=args.strict_metadata,
             max_errors=args.max_errors,
         )
         results = validator.validate()
+
+        if args.jsonl:
+            written_count = results.write_jsonl(args.jsonl, include_info=args.verbose)
+            if args.verbose:
+                print(f"Wrote {written_count} message(s) to {args.jsonl}")
 
         if args.json:
             # Output JSON

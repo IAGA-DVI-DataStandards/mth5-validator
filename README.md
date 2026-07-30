@@ -2,7 +2,7 @@
 
 A **standalone**, lightweight validation tool for MTH5 (Magnetotelluric HDF5) files that checks file format, structure, and metadata compliance.
 
-This is a standalone package that **does not require** the full mth5 installation. It only depends on h5py, making it ideal for:
+This is a standalone package that **does not require** the full mth5 installation. It depends on h5py by default, making it ideal for:
 - Quick validation without installing the full mth5 stack
 - Creating small, distributable executables (~20-30 MB)
 - CI/CD pipelines and automated quality control
@@ -11,12 +11,13 @@ This is a standalone package that **does not require** the full mth5 installatio
 ## Features
 
 - **File Format Validation**: Verify HDF5 file attributes (type, version, data level)
-- **Structure Validation**: Check group hierarchy based on file version (v0.1.4 or v0.2.0)
-- **Metadata Validation**: Basic metadata structure checks
+- **Structure Validation**: Check group hierarchy based on file version (v0.1.0 or v0.2.0)
+- **Metadata Validation (Fast/Full)**: Quick required-key checks or full validation with enums/ranges/cross-field checks
+- **Strict Metadata Validation (Optional)**: Validate against `mt_metadata` schemas when installed
 - **Data Validation**: Optional check for channel data integrity
 - **Lightweight**: Only depends on h5py (no scipy, numpy, obspy, etc.)
 - **Multiple Interfaces**: Use as executable, Python script, or importable module
-- **Flexible Output**: Human-readable reports or JSON for integration
+- **Flexible Output**: Human-readable reports, JSON, or JSONL for integration
 
 ## Installation
 
@@ -84,8 +85,20 @@ mth5-validator validate myfile.mth5 --verbose
 # Check data integrity (slower)
 mth5-validator validate myfile.mth5 --check-data
 
+# Full metadata validation
+mth5-validator validate myfile.mth5 --metadata-level full
+
+# Strict metadata validation using mt_metadata (if installed)
+mth5-validator validate myfile.mth5 --strict-metadata
+
+# Stop after 100 errors
+mth5-validator validate myfile.mth5 --max-errors 100
+
 # JSON output
 mth5-validator validate myfile.mth5 --json
+
+# JSONL output (one record per message)
+mth5-validator validate myfile.mth5 --jsonl report.jsonl
 ```
 
 ### Using as Python Module
@@ -101,10 +114,10 @@ python src/mth5_validator_standalone.py validate myfile.mth5 --verbose
 ### File Format Checks
 
 - **file.type**: Must be "MTH5"
-- **file.version**: Must be "0.1.4" or "0.2.0"
-- **data_level**: Must be 0, 1, or 2
+- **file.version**: Must be "0.1.0" or "0.2.0"
+- **data_level**: Must be 0, 1, 2, or 3
 
-### Structure Checks (v0.1.4)
+### Structure Checks (v0.1.0)
 
 ```
 /Survey
@@ -140,9 +153,13 @@ Each station should contain:
 
 ### Metadata Checks
 
-- Validates metadata attributes exist
-- Checks for required mth5_type attributes
-- Uses mt_metadata schemas for validation
+- Scans metadata attributes in a single HDF5 traversal for efficiency
+- **Quick mode** (`--metadata-level quick`): required keys + type checks
+- **Full mode** (`--metadata-level full`): quick checks + enum/range/cross-field checks
+- Version-aware node classification for v0.1.0 and v0.2.0 layouts
+- Structured error codes in message details (for machine processing)
+- Optional strict schema validation with `mt_metadata` (`--strict-metadata`)
+- Configurable error cap (`--max-errors`) to fail fast on highly-invalid files
 
 ### Data Checks (Optional)
 
@@ -166,9 +183,13 @@ mth5-validator validate FILE [OPTIONS]
 
 **Options:**
 - `-v, --verbose`: Enable verbose output with detailed information
-- `--skip-metadata`: Skip metadata validation (structure only)
+- `--no-check-metadata`: Skip metadata validation (structure only)
+- `--metadata-level {quick,full}`: Metadata validation strictness (default: `quick`)
+- `--strict-metadata`: Enable strict `mt_metadata` schema validation when available
+- `--max-errors N`: Stop validation after N errors (default: `500`)
 - `--check-data`: Check that channels contain data (slower)
 - `--json`: Output results as JSON
+- `--jsonl PATH`: Write newline-delimited JSON validation messages to file
 
 **Exit Codes:**
 - `0`: File is valid
@@ -186,8 +207,17 @@ mth5-validator validate data.mth5 --verbose
 # Full validation including data
 mth5-validator validate data.mth5 --check-data --verbose
 
+# Full metadata validation with fail-fast behavior
+mth5-validator validate data.mth5 --metadata-level full --max-errors 100
+
+# Strict metadata validation when mt_metadata is installed
+mth5-validator validate data.mth5 --strict-metadata
+
 # JSON output for scripting
 mth5-validator validate data.mth5 --json > report.json
+
+# JSONL output for log pipelines
+mth5-validator validate data.mth5 --jsonl report.jsonl
 
 # Batch validation
 for file in data/*.mth5; do
@@ -211,9 +241,32 @@ Results object returned by validation.
 - `print_report(include_info=False)`: Print formatted report
 - `to_dict()`: Convert to dictionary
 - `to_json(**kwargs)`: Convert to JSON string
+- `write_jsonl(file_path, include_info=True)`: Write messages as JSONL records
 - `add_error(category, message, path=None, **details)`: Add error message
 - `add_warning(category, message, path=None, **details)`: Add warning message
 - `add_info(category, message, path=None, **details)`: Add info message
+
+### Metadata Validation Modes
+
+- **Quick mode** (`--metadata-level quick`): Fast metadata validation intended for routine checks.
+- **Full mode** (`--metadata-level full`): Adds deeper semantic checks (enums/ranges/cross-field) for stricter QA.
+- **Strict mode** (`--strict-metadata`): If `mt_metadata` is importable, nodes are validated with `mt_metadata` models. If not available, validation continues with a warning.
+
+### JSONL Output
+
+Use JSONL output for batch pipelines and log ingestion:
+
+```bash
+mth5-validator validate data.mth5 --metadata-level full --jsonl validation.jsonl
+```
+
+Each line is a JSON object containing:
+- file path
+- message level
+- category
+- message text
+- node path
+- structured details (including metadata error code)
 
 ## Use Cases
 
@@ -348,7 +401,8 @@ python build_standalone_validator.py
 
 Unlike the full mth5 package (~150+ MB executable), this standalone validator:
 - ✓ Only depends on h5py (and numpy, which h5py needs)
-- ✓ No scipy, matplotlib, pandas, obspy, mt_metadata
+- ✓ No scipy, matplotlib, pandas, obspy by default
+- ✓ `mt_metadata` is optional and only needed for `--strict-metadata`
 - ✓ Results in ~20-30 MB executables
 - ✓ Fast startup and execution
 - ✓ Perfect for distribution and CI/CD
@@ -427,11 +481,14 @@ lsof | grep myfile.mth5
 
 For large files (>1GB), validation can take time. Options:
 ```bash
-# Skip data checking for faster validation
-mth5-validator validate large_file.mth5  # Structure only
+# Fast path (quick metadata + no data check)
+mth5-validator validate large_file.mth5 --metadata-level quick
 
-# Or explicitly check data (slower but thorough)
-mth5-validator validate large_file.mth5 --check-data
+# Deeper checks (slower but more thorough)
+mth5-validator validate large_file.mth5 --metadata-level full --check-data
+
+# Fail fast if a file is severely malformed
+mth5-validator validate large_file.mth5 --max-errors 100
 ```
 
 ## License

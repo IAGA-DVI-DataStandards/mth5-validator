@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -46,6 +47,31 @@ def _build_minimal_v02_file(file_path: Path, with_node_metadata: bool = True) ->
 
         if with_node_metadata:
             experiment.attrs["mth5_type"] = "survey"
+            survey.attrs["mth5_type"] = "survey"
+            station.attrs["mth5_type"] = "station"
+            run.attrs["mth5_type"] = "run"
+            channel.attrs["mth5_type"] = "channel"
+
+
+def _build_minimal_v01_file(file_path: Path, with_node_metadata: bool = True) -> None:
+    with h5py.File(file_path, "w") as h5:
+        h5.attrs["file.type"] = "MTH5"
+        h5.attrs["file.version"] = "0.1.0"
+        h5.attrs["data_level"] = 1
+
+        survey = h5.create_group("Survey")
+        stations = survey.create_group("Stations")
+        survey.create_group("Reports")
+        survey.create_group("Filters")
+        survey.create_group("Standards")
+        survey.create_dataset("channel_summary", data=[1])
+        survey.create_dataset("tf_summary", data=[1])
+
+        station = stations.create_group("station_a")
+        run = station.create_group("run_a")
+        channel = run.create_dataset("hx", data=[0.1, 0.2, 0.3])
+
+        if with_node_metadata:
             survey.attrs["mth5_type"] = "survey"
             station.attrs["mth5_type"] = "station"
             run.attrs["mth5_type"] = "run"
@@ -125,3 +151,67 @@ def test_full_metadata_respects_max_errors_limit(tmp_path):
     codes = _metadata_codes(results)
     assert "META_MAX_ERRORS_REACHED" in codes
     assert results.error_count <= 2
+
+
+def test_v01_full_metadata_validates_station_run_channel_kinds(tmp_path):
+    file_path = tmp_path / "v01_kind_validation.mth5"
+    _build_minimal_v01_file(file_path, with_node_metadata=False)
+
+    results = MTH5Validator(
+        file_path,
+        check_metadata=True,
+        metadata_level="full",
+        max_errors=100,
+    ).validate()
+
+    errors = [msg for msg in results.messages if msg.level.value == "ERROR"]
+    paths = [
+        msg.path for msg in errors if msg.details.get("code") == "META_MISSING_REQUIRED"
+    ]
+
+    assert "/Survey" in paths
+    assert "/Survey/Stations/station_a" in paths
+    assert "/Survey/Stations/station_a/run_a" in paths
+    assert "/Survey/Stations/station_a/run_a/hx" in paths
+
+
+def test_jsonl_export_writes_records(tmp_path):
+    file_path = tmp_path / "jsonl_export.mth5"
+    _build_minimal_v02_file(file_path, with_node_metadata=False)
+
+    results = MTH5Validator(
+        file_path,
+        check_metadata=True,
+        metadata_level="full",
+    ).validate()
+
+    jsonl_path = tmp_path / "validation.jsonl"
+    written = results.write_jsonl(jsonl_path, include_info=False)
+
+    lines = jsonl_path.read_text(encoding="utf-8").splitlines()
+    assert written == len(lines)
+    assert written > 0
+
+    record = json.loads(lines[0])
+    assert "level" in record
+    assert "category" in record
+    assert "details" in record
+
+
+def test_strict_metadata_mode_marks_attempt(tmp_path):
+    file_path = tmp_path / "strict_attempt.mth5"
+    _build_minimal_v02_file(file_path, with_node_metadata=True)
+
+    results = MTH5Validator(
+        file_path,
+        check_metadata=True,
+        metadata_level="quick",
+        strict_metadata=True,
+    ).validate()
+
+    assert results.checked_items.get("strict_metadata_attempted") is True
+    strict_codes = _metadata_codes(results)
+    assert (
+        "META_STRICT_UNAVAILABLE" in strict_codes
+        or results.checked_items.get("strict_metadata_enabled") is True
+    )
