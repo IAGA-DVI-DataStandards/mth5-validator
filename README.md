@@ -22,7 +22,7 @@ This is a standalone package that **does not require** the full mth5 installatio
 
 ### Option 1: Download Pre-built Executable (No Python Required!)
 
-Download the latest executable for your platform from the [Releases page](https://github.com/MTgeophysics/mth5-validator/releases):
+Download the latest executable for your platform from the [Releases page](https://github.com/IAGA-DVI-DataStandards/mth5-validator/releases):
 
 - **Windows**: `mth5-validator-windows-amd64.exe.zip` (extract the .exe from the .zip file)
 - **Linux**: `mth5-validator-linux-amd64`
@@ -48,7 +48,7 @@ chmod +x mth5-validator-linux-amd64
 pip install mth5-validator
 
 # Or install from source
-git clone https://github.com/MTgeophysics/mth5-validator.git
+git clone https://github.com/IAGA-DVI-DataStandards/mth5-validator.git
 cd mth5-validator
 pip install -e .
 ```
@@ -57,7 +57,7 @@ pip install -e .
 
 ```bash
 # Clone repository
-git clone https://github.com/MTgeophysics/mth5-validator.git
+git clone https://github.com/IAGA-DVI-DataStandards/mth5-validator.git
 cd mth5-validator
 
 # Install dependencies
@@ -329,7 +329,7 @@ Build your own executable locally:
 
 ```bash
 # Clone repository
-git clone https://github.com/MTgeophysics/mth5-validator.git
+git clone https://github.com/IAGA-DVI-DataStandards/mth5-validator.git
 cd mth5-validator
 
 # Install dependencies
@@ -369,7 +369,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Download validator
         run: |
-          wget https://github.com/MTgeophysics/mth5-validator/releases/latest/download/mth5-validator-linux-amd64
+          wget https://github.com/IAGA-DVI-DataStandards/mth5-validator/releases/latest/download/mth5-validator-linux-amd64
           chmod +x mth5-validator-linux-amd64
       - name: Validate files
         run: |
@@ -440,14 +440,14 @@ MIT License - See LICENSE file in mth5 repository.
 
 ## Support
 
-- **Issues**: https://github.com/MTgeophysics/mth5-validator/issues
-- **Discussions**: https://github.com/MTgeophysics/mth5-validator/discussions
-- **Releases**: https://github.com/MTgeophysics/mth5-validator/releases
+- **Issues**: https://github.com/IAGA-DVI-DataStandards/mth5-validator/issues
+- **Discussions**: https://github.com/IAGA-DVI-DataStandards/mth5-validator/discussions
+- **Releases**: https://github.com/IAGA-DVI-DataStandards/mth5-validator/releases
 
 ## Related Projects
 
-- **MTH5**: Full-featured MTH5 file manipulation library - [https://github.com/kujaku11/mth5](https://github.com/kujaku11/mth5)
-- **mt_metadata**: Metadata standards for magnetotellurics - [https://github.com/kujaku11/mt_metadata](https://github.com/kujaku11/mt_metadata)
+- **MTH5**: Full-featured MTH5 file manipulation library - [https://github.com/IAGA-DVI-DataStandards/mth5](https://github.com/IAGA-DVI-DataStandards/mth5)
+- **mt_metadata**: Metadata standards for magnetotellurics - [https://github.com/IAGA-DVI-DataStandards/mt_metadata](https://github.com/IAGA-DVI-DataStandards/mt_metadata)
 - **MTpy-v2**: Magnetotelluric data processing - [https://github.com/MTgeophysics/mtpy-v2](https://github.com/MTgeophysics/mtpy-v2)
 
 ## Development
@@ -520,7 +520,7 @@ jobs:
       
       - name: Download MTH5 Validator
         run: |
-          wget https://github.com/MTgeophysics/mth5-validator/releases/latest/download/mth5-validator-linux-amd64
+          wget https://github.com/IAGA-DVI-DataStandards/mth5-validator/releases/latest/download/mth5-validator-linux-amd64
           chmod +x mth5-validator-linux-amd64
       
       - name: Validate all MTH5 files
@@ -548,7 +548,7 @@ jobs:
       
       - name: Download MTH5 Validator
         run: |
-          wget https://github.com/MTgeophysics/mth5-validator/releases/latest/download/mth5-validator-linux-amd64
+          wget https://github.com/IAGA-DVI-DataStandards/mth5-validator/releases/latest/download/mth5-validator-linux-amd64
           chmod +x mth5-validator-linux-amd64
       
       - name: Create reports directory
