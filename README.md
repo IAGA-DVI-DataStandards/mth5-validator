@@ -751,8 +751,8 @@ Always verify downloaded executables using checksums:
 
 ```bash
 # Download executable and checksum
-wget https://github.com/MTgeophysics/mth5-validator/releases/latest/download/mth5-validator-linux-amd64
-wget https://github.com/MTgeophysics/mth5-validator/releases/latest/download/mth5-validator-linux-amd64.sha256
+wget https://github.com/IAGA-DVI-DataStandards/mth5-validator/releases/latest/download/mth5-validator-linux-amd64
+wget https://github.com/IAGA-DVI-DataStandards/mth5-validator/releases/latest/download/mth5-validator-linux-amd64.sha256
 
 # Verify
 sha256sum -c mth5-validator-linux-amd64.sha256
