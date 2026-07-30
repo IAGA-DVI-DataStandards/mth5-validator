@@ -372,7 +372,7 @@ This repository is configured with GitHub Actions to automatically build executa
 
 **On Push**: Artifacts are uploaded and available for download from the Actions tab.
 
-**On Tags** (e.g., `v0.1.4`): Executables are automatically attached to the GitHub Release.
+**On Tags** (e.g., `v0.1.5`): Executables are automatically attached to the GitHub Release.
 
 The workflow file is located at [.github/workflows/build-executables.yml](.github/workflows/build-executables.yml).
 

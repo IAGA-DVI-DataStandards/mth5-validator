@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mth5-validator"
-version = "0.1.4"
+version = "0.1.5"
 description = "Standalone validator for MTH5 (Magnetotelluric HDF5) files"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -66,7 +66,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 
 [tool.bumpversion]
-current_version = "0.1.4"
+current_version = "0.1.5"
 commit = true
 tag = true
 
