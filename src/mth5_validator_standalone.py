@@ -23,13 +23,13 @@ Date: February 9, 2026
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
-
 
 try:
     import h5py
@@ -42,6 +42,60 @@ except ImportError:
 ACCEPTABLE_FILE_VERSIONS = ["0.1.0", "0.2.0"]
 ACCEPTABLE_FILE_TYPES = ["MTH5"]
 ACCEPTABLE_DATA_LEVELS = [0, 1, 2, 3]
+
+
+METADATA_REQUIRED_KEYS = {
+    "root": {"file.type", "file.version"},
+    "survey": set(),
+    "station": set(),
+    "run": set(),
+    "channel": set(),
+    "summary_dataset": set(),
+}
+
+METADATA_FULL_REQUIRED_KEYS = {
+    "survey": {"mth5_type"},
+    "station": {"mth5_type"},
+    "run": {"mth5_type"},
+    "channel": {"mth5_type"},
+}
+
+METADATA_TYPE_CHECKS = {
+    "file.type": (str,),
+    "file.version": (str,),
+    "data_level": (int,),
+    "mth5_type": (str,),
+    "sample_rate": (int, float),
+    "latitude": (int, float),
+    "longitude": (int, float),
+    "elevation": (int, float),
+    "component": (str,),
+    "time_period.start": (str,),
+    "time_period.end": (str,),
+}
+
+METADATA_ENUM_CHECKS = {
+    "file.type": set(ACCEPTABLE_FILE_TYPES),
+    "file.version": set(ACCEPTABLE_FILE_VERSIONS),
+    "data_level": set(ACCEPTABLE_DATA_LEVELS),
+    "component": {"ex", "ey", "hx", "hy", "hz", "temperature"},
+}
+
+METADATA_RANGE_CHECKS = {
+    "latitude": (-90.0, 90.0),
+    "longitude": (-180.0, 180.0),
+}
+
+EXPECTED_MTH5_TYPE_BY_KIND = {
+    "survey": "survey",
+    "station": "station",
+    "run": "run",
+    "channel": "channel",
+}
+
+
+class _StopValidation(Exception):
+    """Internal exception used to stop scanning once max errors is reached."""
 
 
 class ValidationLevel(Enum):
@@ -195,10 +249,18 @@ class MTH5Validator:
         file_path: str | Path,
         verbose: bool = False,
         check_data: bool = False,
+        check_metadata: bool = True,
+        metadata_level: str = "quick",
+        max_errors: int = 500,
     ):
         self.file_path = Path(file_path)
         self.verbose = verbose
         self.check_data = check_data
+        self.check_metadata = check_metadata
+        self.metadata_level = metadata_level.lower()
+        if self.metadata_level not in {"quick", "full"}:
+            raise ValueError("metadata_level must be 'quick' or 'full'")
+        self.max_errors = max_errors
         self.results = ValidationResults(file_path=self.file_path)
         self.h5_file = None
 
@@ -221,9 +283,14 @@ class MTH5Validator:
             if file_version:
                 self._validate_structure(file_version)
 
-                # Check data if requested
-                if self.check_data:
-                    self._validate_data()
+            # Validate metadata attributes if requested.
+            # Run even when file.version is missing so root metadata is still checked.
+            if self.check_metadata and not self._max_errors_reached:
+                self._validate_metadata(file_version or "")
+
+            # Check data if requested
+            if self.check_data and not self._max_errors_reached:
+                self._validate_data()
 
         except Exception as e:
             self.results.add_error("Validation", f"Unexpected error: {str(e)}")
@@ -318,6 +385,326 @@ class MTH5Validator:
     def _get_file_version(self) -> str | None:
         """Get file version from attributes."""
         return self.h5_file.attrs.get("file.version")
+
+    @property
+    def _max_errors_reached(self) -> bool:
+        """Check if validator reached configured max errors."""
+        return self.max_errors > 0 and self.results.error_count >= self.max_errors
+
+    def _add_metadata_issue(
+        self,
+        level: ValidationLevel,
+        code: str,
+        message: str,
+        path: str,
+        **details,
+    ) -> None:
+        """Add a structured metadata validation message."""
+        issue_details = {"code": code, **details}
+        if level == ValidationLevel.ERROR:
+            self.results.add_error("Metadata", message, path=path, **issue_details)
+        elif level == ValidationLevel.WARNING:
+            self.results.add_warning("Metadata", message, path=path, **issue_details)
+        else:
+            self.results.add_info("Metadata", message, path=path, **issue_details)
+
+    def _normalize_attr_value(self, value: Any) -> Any:
+        """Normalize HDF5 attribute values to plain Python values."""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+
+        if hasattr(value, "item"):
+            try:
+                value = value.item()
+            except Exception:
+                return value
+
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+
+        return value
+
+    def _collect_attrs(self, attrs: Any) -> dict[str, Any]:
+        """Collect and normalize object attributes into a dictionary."""
+        attr_map: dict[str, Any] = {}
+        for key in attrs.keys():
+            try:
+                attr_map[str(key)] = self._normalize_attr_value(attrs[key])
+            except Exception as exc:
+                attr_map[str(key)] = attrs[key]
+                self._add_metadata_issue(
+                    ValidationLevel.WARNING,
+                    "META_NORMALIZATION_ERROR",
+                    f"Could not normalize metadata attribute '{key}': {exc}",
+                    path="/",
+                    key=str(key),
+                    actual_type=type(attrs[key]).__name__,
+                )
+        return attr_map
+
+    def _parse_timestamp(self, value: Any) -> datetime | None:
+        """Parse ISO timestamp attributes for cross-field validation."""
+        if not isinstance(value, str) or not value.strip():
+            return None
+
+        text = value.strip().replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            return None
+
+    def _classify_node_kind(self, path: str, obj: Any, file_version: str) -> str | None:
+        """Classify HDF5 node into a metadata schema kind."""
+        if path in {"/Survey", "/Experiment"} and isinstance(obj, h5py.Group):
+            return "survey"
+
+        if path.endswith("/channel_summary") or path.endswith("/tf_summary"):
+            if isinstance(obj, h5py.Dataset):
+                return "summary_dataset"
+
+        if file_version == "0.1.0" and path.startswith("/Survey/Stations/"):
+            parts = path.split("/")
+            if isinstance(obj, h5py.Group) and len(parts) == 4:
+                return "station"
+            if isinstance(obj, h5py.Group) and len(parts) == 5:
+                return "run"
+            if isinstance(obj, h5py.Dataset) and len(parts) == 6:
+                return "channel"
+
+        if file_version == "0.2.0" and path.startswith("/Experiment/Surveys/"):
+            parts = path.split("/")
+            if isinstance(obj, h5py.Group) and len(parts) == 4:
+                return "survey"
+            if (
+                isinstance(obj, h5py.Group)
+                and len(parts) == 6
+                and parts[4] == "Stations"
+            ):
+                return "station"
+            if (
+                isinstance(obj, h5py.Group)
+                and len(parts) == 7
+                and parts[4] == "Stations"
+            ):
+                return "run"
+            if (
+                isinstance(obj, h5py.Dataset)
+                and len(parts) == 8
+                and parts[4] == "Stations"
+            ):
+                return "channel"
+
+        return None
+
+    def _validate_node_metadata(
+        self,
+        path: str,
+        kind: str,
+        attr_map: dict[str, Any],
+    ) -> None:
+        """Validate one node's metadata attributes against lightweight rules."""
+        if self._max_errors_reached:
+            raise _StopValidation()
+
+        required_keys = set(METADATA_REQUIRED_KEYS.get(kind, set()))
+        if self.metadata_level == "full":
+            required_keys.update(METADATA_FULL_REQUIRED_KEYS.get(kind, set()))
+
+        present_keys = set(attr_map.keys())
+        missing_required = sorted(required_keys - present_keys)
+
+        for key in missing_required:
+            self._add_metadata_issue(
+                ValidationLevel.ERROR,
+                "META_MISSING_REQUIRED",
+                f"Missing required metadata key '{key}'",
+                path=path,
+                key=key,
+                object_kind=kind,
+            )
+            if self._max_errors_reached:
+                raise _StopValidation()
+
+        # Quick mode stops after required keys and type checks.
+        keys_to_type_check = METADATA_TYPE_CHECKS.keys() & present_keys
+        for key in keys_to_type_check:
+            value = attr_map[key]
+            expected_types = METADATA_TYPE_CHECKS[key]
+            if not isinstance(value, expected_types):
+                expected_names = ", ".join(t.__name__ for t in expected_types)
+                self._add_metadata_issue(
+                    ValidationLevel.ERROR,
+                    "META_TYPE_MISMATCH",
+                    f"Metadata key '{key}' has type {type(value).__name__}, expected {expected_names}",
+                    path=path,
+                    key=key,
+                    expected=expected_names,
+                    actual=type(value).__name__,
+                    object_kind=kind,
+                )
+                if self._max_errors_reached:
+                    raise _StopValidation()
+
+        if self.metadata_level == "quick":
+            return
+
+        # Full mode enum checks.
+        for key, allowed_values in METADATA_ENUM_CHECKS.items():
+            if key not in attr_map:
+                continue
+            value = attr_map[key]
+            if value not in allowed_values:
+                self._add_metadata_issue(
+                    ValidationLevel.ERROR,
+                    "META_ENUM_INVALID",
+                    f"Metadata key '{key}' has invalid value '{value}'",
+                    path=path,
+                    key=key,
+                    expected=sorted(allowed_values),
+                    actual=value,
+                    object_kind=kind,
+                )
+                if self._max_errors_reached:
+                    raise _StopValidation()
+
+        # Full mode numeric range checks.
+        for key, (min_value, max_value) in METADATA_RANGE_CHECKS.items():
+            if key not in attr_map:
+                continue
+            value = attr_map[key]
+            if isinstance(value, (int, float)) and (
+                value < min_value or value > max_value
+            ):
+                self._add_metadata_issue(
+                    ValidationLevel.ERROR,
+                    "META_RANGE_INVALID",
+                    f"Metadata key '{key}'={value} outside allowed range [{min_value}, {max_value}]",
+                    path=path,
+                    key=key,
+                    expected=f"[{min_value}, {max_value}]",
+                    actual=value,
+                    object_kind=kind,
+                )
+                if self._max_errors_reached:
+                    raise _StopValidation()
+
+        # Full mode cross-field checks.
+        if "sample_rate" in attr_map:
+            sample_rate = attr_map["sample_rate"]
+            if isinstance(sample_rate, (int, float)) and sample_rate <= 0:
+                self._add_metadata_issue(
+                    ValidationLevel.ERROR,
+                    "META_RANGE_INVALID",
+                    "Metadata key 'sample_rate' must be > 0",
+                    path=path,
+                    key="sample_rate",
+                    expected="> 0",
+                    actual=sample_rate,
+                    object_kind=kind,
+                )
+                if self._max_errors_reached:
+                    raise _StopValidation()
+
+        if "time_period.start" in attr_map and "time_period.end" in attr_map:
+            start_time = self._parse_timestamp(attr_map["time_period.start"])
+            end_time = self._parse_timestamp(attr_map["time_period.end"])
+            if (
+                start_time is not None
+                and end_time is not None
+                and start_time > end_time
+            ):
+                self._add_metadata_issue(
+                    ValidationLevel.ERROR,
+                    "META_CROSS_FIELD_INVALID",
+                    "time_period.start is after time_period.end",
+                    path=path,
+                    key="time_period.start,time_period.end",
+                    expected="start <= end",
+                    actual=f"{attr_map['time_period.start']} > {attr_map['time_period.end']}",
+                    object_kind=kind,
+                )
+                if self._max_errors_reached:
+                    raise _StopValidation()
+
+        if "mth5_type" in attr_map and kind in EXPECTED_MTH5_TYPE_BY_KIND:
+            expected_type = EXPECTED_MTH5_TYPE_BY_KIND[kind]
+            actual_type = str(attr_map["mth5_type"]).lower()
+            if actual_type != expected_type:
+                self._add_metadata_issue(
+                    ValidationLevel.WARNING,
+                    "META_KIND_MISMATCH",
+                    f"mth5_type '{attr_map['mth5_type']}' does not match expected kind '{expected_type}'",
+                    path=path,
+                    key="mth5_type",
+                    expected=expected_type,
+                    actual=attr_map["mth5_type"],
+                    object_kind=kind,
+                )
+
+    def _validate_metadata(self, file_version: str) -> None:
+        """Scan and validate metadata attributes on groups and datasets."""
+        scanned_nodes = 0
+        validated_nodes = 0
+
+        try:
+            root_attrs = self._collect_attrs(self.h5_file.attrs)
+            self._validate_node_metadata(path="/", kind="root", attr_map=root_attrs)
+            scanned_nodes += 1
+            validated_nodes += 1
+
+            def scan_node(name: str, obj: Any) -> None:
+                nonlocal scanned_nodes, validated_nodes
+                if self._max_errors_reached:
+                    raise _StopValidation()
+
+                path = f"/{name}"
+                scanned_nodes += 1
+
+                kind = self._classify_node_kind(path, obj, file_version)
+                if kind is None:
+                    return
+
+                try:
+                    attr_map = self._collect_attrs(obj.attrs)
+                    self._validate_node_metadata(
+                        path=path, kind=kind, attr_map=attr_map
+                    )
+                    validated_nodes += 1
+                except _StopValidation:
+                    raise
+                except Exception as exc:
+                    self._add_metadata_issue(
+                        ValidationLevel.ERROR,
+                        "META_NODE_EXCEPTION",
+                        f"Exception validating metadata: {exc}",
+                        path=path,
+                        object_kind=kind,
+                    )
+
+            self.h5_file.visititems(scan_node)
+
+        except _StopValidation:
+            self.results.add_warning(
+                "Metadata",
+                f"Stopped metadata validation after reaching max_errors={self.max_errors}",
+                code="META_MAX_ERRORS_REACHED",
+                max_errors=self.max_errors,
+            )
+        except Exception as exc:
+            self.results.add_warning(
+                "Metadata",
+                f"Unexpected metadata scan error: {exc}",
+                code="META_SCAN_EXCEPTION",
+            )
+
+        self.results.checked_items["metadata_scan"] = True
+        self.results.checked_items["metadata_nodes_scanned"] = scanned_nodes
+        self.results.checked_items["metadata_nodes_validated"] = validated_nodes
+        if self.verbose:
+            self.results.add_info(
+                "Metadata",
+                f"Scanned {scanned_nodes} node(s), validated metadata on {validated_nodes} node(s)",
+            )
 
     def _validate_structure(self, file_version: str) -> None:
         """Validate group structure based on file version."""
@@ -541,6 +928,23 @@ Examples:
         help="Check that channels contain data (may be slow)",
     )
     validate_parser.add_argument(
+        "--no-check-metadata",
+        action="store_true",
+        help="Skip metadata validation",
+    )
+    validate_parser.add_argument(
+        "--metadata-level",
+        choices=["quick", "full"],
+        default="quick",
+        help="Metadata validation strictness (default: quick)",
+    )
+    validate_parser.add_argument(
+        "--max-errors",
+        type=int,
+        default=500,
+        help="Maximum number of errors before stopping validation (default: 500)",
+    )
+    validate_parser.add_argument(
         "--json", action="store_true", help="Output results as JSON"
     )
 
@@ -552,7 +956,12 @@ Examples:
     if args.command == "validate":
         # Validate file
         validator = MTH5Validator(
-            args.file, verbose=args.verbose, check_data=args.check_data
+            args.file,
+            verbose=args.verbose,
+            check_data=args.check_data,
+            check_metadata=not args.no_check_metadata,
+            metadata_level=args.metadata_level,
+            max_errors=args.max_errors,
         )
         results = validator.validate()
 
